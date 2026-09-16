@@ -89,11 +89,37 @@ def _locality_phrase(name, kind):
     administrative = _ADMINISTRATIVE_TYPES.get(kind_key)
     if administrative:
         return f"{_adjective_to_genitive(name)} {administrative}".strip()
-    genitive = SETTLEMENT_TYPE_GENITIVE.get(kind_key, str(kind or "").strip())
+    genitive = SETTLEMENT_TYPE_GENITIVE.get(kind_key)
+    if genitive is None:
+        genitive = SETTLEMENT_TYPE_GENITIVE.get(
+            kind_key.rstrip("."),
+            str(kind or "").strip(),
+        )
     return f"{genitive} {name}".strip()
 
 
-def _replace_locality_text(value, name=None, kind=None, outside=False):
+def _location_components(values):
+    """Возвращает НП и его родительское поселение из строки Locations."""
+
+    locality_name = values.get("locality_name")
+    locality_kind = values.get("locality_type")
+    city_name = values.get("city_name")
+    city_kind = values.get("city_type")
+    if locality_name and locality_kind:
+        return locality_name, locality_kind, city_name, city_kind
+    if city_name and city_kind:
+        return city_name, city_kind, None, None
+    return None, None, None, None
+
+
+def _replace_locality_text(
+    value,
+    name=None,
+    kind=None,
+    outside=False,
+    parent_name=None,
+    parent_kind=None,
+):
     """Меняет только НП после «в границах», сохраняя район и регион."""
     if not isinstance(value, str):
         return value, False
@@ -107,6 +133,9 @@ def _replace_locality_text(value, name=None, kind=None, outside=False):
         ) else "муниципального образования"
     else:
         replacement = _locality_phrase(name, kind)
+        parent = _locality_phrase(parent_name, parent_kind)
+        if parent and _normalise_type(parent) != _normalise_type(replacement):
+            replacement = f"{replacement} {parent}".strip()
     new_value = value[:match.start("locality")] + replacement + value[match.end("locality"):]
     return new_value, True
 
@@ -725,14 +754,13 @@ class MdbCopyPage(BasePage):
                     str(column).strip().casefold(): value
                     for column, value in zip(columns, row)
                 }
-                name = values.get("city_name")
-                kind = values.get("city_type")
-                if not name or not kind:
-                    name = values.get("locality_name")
-                    kind = values.get("locality_type")
+                name, kind, parent_name, parent_kind = _location_components(values)
                 if name and kind:
-                    return str(name).strip(), str(kind).strip()
-            return None, None
+                    return tuple(
+                        str(value).strip() if value else None
+                        for value in (name, kind, parent_name, parent_kind)
+                    )
+            return None, None, None, None
         finally:
             connection.close()
 
@@ -997,7 +1025,15 @@ class MdbCopyPage(BasePage):
         self.fias_check_btn.setEnabled(enabled)
         self.fias_cleanup_btn.setEnabled(enabled)
 
-    def _update_title(self, path, name, kind, outside=False):
+    def _update_title(
+        self,
+        path,
+        name,
+        kind,
+        outside=False,
+        parent_name=None,
+        parent_kind=None,
+    ):
         connection, updated = self._get_conn(path), 0
         try:
             cursor = connection.cursor()
@@ -1014,7 +1050,14 @@ class MdbCopyPage(BasePage):
             for row in cursor.fetchall():
                 values = dict(zip(columns, row))
                 old = values.get(field)
-                new, found = _replace_locality_text(old, name, kind, outside)
+                new, found = _replace_locality_text(
+                    old,
+                    name,
+                    kind,
+                    outside,
+                    parent_name,
+                    parent_kind,
+                )
                 matched = matched or found
                 if found and new != old:
                     cursor.execute(
@@ -1186,12 +1229,18 @@ class MdbCopyPage(BasePage):
                 if outside:
                     updated = self._update_title(path, None, None, True)
                 else:
-                    name, kind = self._get_locality(path)
+                    name, kind, parent_name, parent_kind = self._get_locality(path)
                     if not name:
                         signals.message.emit(f"НП не найден: {path}")
                         signals.progress.emit(position, len(files))
                         continue
-                    updated = self._update_title(path, name, kind)
+                    updated = self._update_title(
+                        path,
+                        name,
+                        kind,
+                        parent_name=parent_name,
+                        parent_kind=parent_kind,
+                    )
                 total_updated += updated
                 signals.message.emit(f"{os.path.basename(path)}: обновлено строк {updated}")
             except Exception as error:

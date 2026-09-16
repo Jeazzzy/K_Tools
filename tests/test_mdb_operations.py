@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pages.mdb_operations import (
     MdbCopyPage,
+    _location_components,
     _locality_phrase,
     _replace_locality_text,
 )
@@ -54,6 +55,53 @@ class MdbAddressTextTests(unittest.TestCase):
             expected, "Ахтанизовское", "с.п."
         )
         self.assertTrue(matched)
+        self.assertEqual(repeated, expected)
+
+    def test_prefers_locality_and_keeps_parent_settlement(self):
+        components = _location_components(
+            {
+                "city_name": "Курчанское",
+                "city_type": "с.п.",
+                "locality_name": "Красный Октябрь",
+                "locality_type": "п.",
+            }
+        )
+
+        self.assertEqual(
+            components,
+            ("Красный Октябрь", "п.", "Курчанское", "с.п."),
+        )
+
+    def test_adds_locality_before_parent_settlement_and_is_idempotent(self):
+        expected = (
+            "Ж1. Зона застройки индивидуальными жилыми домами в границах "
+            "поселка Красный Октябрь Курчанского сельского поселения "
+            "Темрюкского района Краснодарского края"
+        )
+        original = (
+            "Ж1. Зона застройки индивидуальными жилыми домами в границах "
+            "Курчанского сельского поселения Темрюкского района "
+            "Краснодарского края"
+        )
+
+        updated, matched = _replace_locality_text(
+            original,
+            "Красный Октябрь",
+            "п.",
+            parent_name="Курчанское",
+            parent_kind="с.п.",
+        )
+        repeated, repeated_matched = _replace_locality_text(
+            updated,
+            "Красный Октябрь",
+            "п.",
+            parent_name="Курчанское",
+            parent_kind="с.п.",
+        )
+
+        self.assertTrue(matched)
+        self.assertTrue(repeated_matched)
+        self.assertEqual(updated, expected)
         self.assertEqual(repeated, expected)
 
 
