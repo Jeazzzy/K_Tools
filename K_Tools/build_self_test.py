@@ -1,4 +1,4 @@
-"""Smoke-test native GIS dependencies in both Python and the frozen EXE."""
+"""Smoke-test native and packaged dependencies in Python and the frozen EXE."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _write_report(report_path: str | os.PathLike[str] | None, text: str) -> None
 
 
 def run(report_path: str | os.PathLike[str] | None = None) -> int:
-    """Return zero only when pyogrio can really write and read a MapInfo TAB."""
+    """Return zero only when GIS and Word integration dependencies are packaged."""
 
     try:
         import geopandas as gpd
@@ -41,6 +41,12 @@ def run(report_path: str | os.PathLike[str] | None = None) -> int:
 
         for module_name in PYOGRIO_NATIVE_MODULES:
             importlib.import_module(module_name)
+        importlib.import_module("pythoncom")
+        importlib.import_module("win32com.client")
+
+        address_file = Path(__file__).resolve().parent / "resources" / "addresses_lo.csv"
+        if not address_file.is_file() or address_file.stat().st_size == 0:
+            raise RuntimeError("The Lenoblast address hint resource is missing")
 
         with tempfile.TemporaryDirectory(prefix="k_tools_gis_test_") as temp_dir:
             tab_path = Path(temp_dir) / "probe.tab"
@@ -62,6 +68,7 @@ def run(report_path: str | os.PathLike[str] | None = None) -> int:
 
         report = (
             "OK: GIS self-test passed\n"
+            "OK: Word COM dependencies and address hints are packaged\n"
             f"pyogrio={pyogrio.__version__}\n"
             f"GDAL={pyogrio.__gdal_version_string__}\n"
         )

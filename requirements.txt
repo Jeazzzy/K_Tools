@@ -4,6 +4,9 @@ PySide6>=6.8.0
 # Работа с MDB
 pyodbc>=5.1.0
 
+# Microsoft Word COM для инструмента «Описание ЛО»
+pywin32>=312,<313
+
 # GIS
 geopandas>=1.0.0
 pyogrio>=0.9.0

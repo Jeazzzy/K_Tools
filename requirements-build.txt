@@ -20,6 +20,7 @@ PySide6_Addons==6.11.1
 PySide6_Essentials==6.11.1
 python-dateutil==2.9.0.post0
 pywin32-ctypes==0.2.3
+pywin32==312
 scipy==1.18.0
 setuptools==83.0.0
 shapely==2.1.2

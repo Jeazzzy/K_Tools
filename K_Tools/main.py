@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from pages import (
     HelpPage,
+    LoDescriptionPage,
     MdbCopyPage,
     MifProjectionPage,
     ReleaseCheckerPage,
@@ -109,14 +110,14 @@ class Application(QMainWindow):
         self.sidebar.setFixedWidth(235)
         side_layout = QVBoxLayout(self.sidebar)
         side_layout.setContentsMargins(16, 22, 16, 18)
-        side_layout.setSpacing(6)
+        side_layout.setSpacing(4)
         brand = QLabel("K Tools")
         brand.setObjectName("brand")
         side_layout.addWidget(brand)
         self.brand_subtitle = QLabel("Кадастровые инструменты")
         self.brand_subtitle.setObjectName("brandSub")
         side_layout.addWidget(self.brand_subtitle)
-        side_layout.addSpacing(22)
+        side_layout.addSpacing(14)
 
         self.stack = QStackedWidget()
         self.nav_buttons = []
@@ -125,6 +126,7 @@ class Application(QMainWindow):
             ("XML → CSV", XmlExtractorPage),
             ("Распаковка ZIP", ZipProcessorPage),
             ("Исправление MIF", MifProjectionPage),
+            ("Описание ЛО", LoDescriptionPage),
             ("Работа с MDB", MdbCopyPage),
             ("Разделение ТЗ", TzSplitterPage),
             ("Проверка выпуска", ReleaseCheckerPage),
@@ -135,7 +137,7 @@ class Application(QMainWindow):
             button = QPushButton(title)
             button.setObjectName("navButton")
             button.setCheckable(True)
-            button.setMinimumHeight(43)
+            button.setMinimumHeight(40)
             button.clicked.connect(lambda checked=False, i=index: self.navigate_to(i))
             buttons.addButton(button)
             self.nav_buttons.append(button)
