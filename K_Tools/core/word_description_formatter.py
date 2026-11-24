@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -489,19 +490,20 @@ def _validate_format_request(
         raise ValueError("Укажите поселение.")
 
 
-def format_document(
+def _format_document_in_word(
+    word,
     source: str | Path,
     target: str | Path,
     region: str,
     district: str,
     settlement: str,
     locality: str | None = None,
+    message_callback: Callable[[str], None] | None = None,
 ) -> DocumentInfo:
-    """Создаёт оформленную копию, не изменяя исходник и старый результат при сбое."""
+    """Оформляет один документ в уже запущенном экземпляре Microsoft Word."""
 
     source, target = Path(source), Path(target)
     _validate_format_request(source, target, region, district, settlement)
-    _require_word_automation()
     target.parent.mkdir(parents=True, exist_ok=True)
 
     descriptor, temporary_name = tempfile.mkstemp(
@@ -517,15 +519,12 @@ def format_document(
         temporary.unlink(missing_ok=True)
         raise
 
-    com_initialized = False
-    word = None
     document = None
     info: DocumentInfo | None = None
     primary_error: BaseException | None = None
     try:
-        pythoncom.CoInitialize()
-        com_initialized = True
-        word = _open_word()
+        if message_callback is not None:
+            message_callback(f"Открытие Word: {source}")
         document = _open_document(word, temporary, read_only=False)
         if document.ReadOnly:
             raise RuntimeError("Word открыл временную копию только для чтения.")
@@ -550,11 +549,21 @@ def format_document(
             if _is_coordinate_table(table):
                 _format_coordinate_table(table)
                 coordinate_tables.append(table)
-        for table in coordinate_tables:
+        if message_callback is not None:
+            message_callback(
+                f"Координатных таблиц: {len(coordinate_tables)}; подготовка пагинации…"
+            )
+        for table_number, table in enumerate(coordinate_tables, start=1):
             if table.Columns.Count == 8:
+                if message_callback is not None:
+                    message_callback(
+                        f"Перепагинация таблицы {table_number} из {len(coordinate_tables)}…"
+                    )
                 _insert_number_rows_on_new_pages(word, document, table)
         _disable_all_heading_rows(word, document)
 
+        if message_callback is not None:
+            message_callback("Сохранение результата…")
         document.Save()
         info = DocumentInfo(full_address, place, len(coordinate_tables))
     except BaseException as error:
@@ -567,16 +576,7 @@ def format_document(
                 primary_error = RuntimeError("Word не смог закрыть обработанный документ.")
         finally:
             document = None
-            try:
-                _finish_word(word)
-            except Exception:
-                if primary_error is None:
-                    primary_error = RuntimeError("Word не смог завершить COM-сеанс.")
-            finally:
-                word = None
-                gc.collect()
-                if com_initialized:
-                    pythoncom.CoUninitialize()
+            gc.collect()
 
         if primary_error is not None and info is not None:
             info = None
@@ -595,14 +595,56 @@ def format_document(
     return info
 
 
+def format_document(
+    source: str | Path,
+    target: str | Path,
+    region: str,
+    district: str,
+    settlement: str,
+    locality: str | None = None,
+) -> DocumentInfo:
+    """Создаёт оформленную копию, не изменяя исходник и старый результат при сбое."""
+
+    _validate_format_request(Path(source), Path(target), region, district, settlement)
+    _require_word_automation()
+    pythoncom.CoInitialize()
+    word = None
+    primary_error: BaseException | None = None
+    try:
+        word = _open_word()
+        return _format_document_in_word(
+            word,
+            source,
+            target,
+            region,
+            district,
+            settlement,
+            locality,
+        )
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        try:
+            _finish_word(word)
+        except Exception:
+            if primary_error is None:
+                raise RuntimeError("Word не смог завершить COM-сеанс.")
+        finally:
+            word = None
+            gc.collect()
+            pythoncom.CoUninitialize()
+
+
 def format_description_documents(
     documents: tuple[BatchDocument, ...] | list[BatchDocument],
     region: str,
     district: str,
     settlement: str,
     progress_callback: Callable[[int, int], None] | None = None,
+    message_callback: Callable[[str], None] | None = None,
 ) -> BatchFormatResult:
-    """Последовательно оформляет выбранные в предпросмотре документы."""
+    """Оформляет выбранные документы в одном общем сеансе Microsoft Word."""
 
     documents = tuple(documents)
     completed: list[DocumentInfo] = []
@@ -611,24 +653,85 @@ def format_description_documents(
     if progress_callback is not None:
         progress_callback(0, max(total, 1))
 
-    for position, document in enumerate(documents, start=1):
-        try:
-            completed.append(
-                format_document(
-                    document.source,
-                    document.target,
-                    region,
-                    district,
-                    settlement,
-                    document.locality,
+    if not documents:
+        return BatchFormatResult(documents, (), ())
+
+    _require_word_automation()
+    pythoncom.CoInitialize()
+    word = None
+    batch_started = time.monotonic()
+    try:
+        if message_callback is not None:
+            message_callback(f"Запуск Microsoft Word. Документов в очереди: {total}.")
+        word = _open_word()
+        for position, document in enumerate(documents, start=1):
+            document_started = time.monotonic()
+            if message_callback is not None:
+                message_callback(f"[{position}/{total}] Начало: {document.source}")
+            failed = False
+            stage_callback = None
+            if message_callback is not None:
+                stage_callback = lambda text, current=position: message_callback(
+                    f"[{current}/{total}] {text}"
                 )
-            )
-        except Exception as error:
-            failures.append(BatchFailure(document.source, str(error)))
-        if progress_callback is not None:
-            progress_callback(position, max(total, 1))
+            try:
+                completed.append(
+                    _format_document_in_word(
+                        word,
+                        document.source,
+                        document.target,
+                        region,
+                        district,
+                        settlement,
+                        document.locality,
+                        stage_callback,
+                    )
+                )
+            except Exception as error:
+                failed = True
+                failures.append(BatchFailure(document.source, str(error)))
+                if message_callback is not None:
+                    message_callback(
+                        f"[{position}/{total}] ОШИБКА: {document.source} — {error}"
+                    )
+
+            elapsed = time.monotonic() - document_started
+            batch_elapsed = time.monotonic() - batch_started
+            remaining = (batch_elapsed / position) * (total - position)
+            if message_callback is not None:
+                outcome = "с ошибкой" if failed else "готово"
+                message_callback(
+                    f"[{position}/{total}] {outcome} за {_format_duration(elapsed)}. "
+                    f"Примерно осталось: {_format_duration(remaining)}."
+                )
+            if progress_callback is not None:
+                progress_callback(position, max(total, 1))
+    finally:
+        try:
+            _finish_word(word)
+        finally:
+            word = None
+            gc.collect()
+            pythoncom.CoUninitialize()
+
+    if message_callback is not None:
+        message_callback(
+            f"Пакет завершён за {_format_duration(time.monotonic() - batch_started)}: "
+            f"готово {len(completed)}, ошибок {len(failures)}."
+        )
 
     return BatchFormatResult(documents, tuple(completed), tuple(failures))
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours} ч {minutes} мин"
+    if minutes:
+        return f"{minutes} мин {seconds} с"
+    return f"{seconds} с"
 
 
 def format_description_folder(
@@ -637,6 +740,7 @@ def format_description_folder(
     district: str,
     settlement: str,
     progress_callback: Callable[[int, int], None] | None = None,
+    message_callback: Callable[[str], None] | None = None,
 ) -> BatchFormatResult:
     """Последовательно оформляет все документы, найденные в корневой папке."""
 
@@ -646,4 +750,5 @@ def format_description_folder(
         district,
         settlement,
         progress_callback,
+        message_callback,
     )

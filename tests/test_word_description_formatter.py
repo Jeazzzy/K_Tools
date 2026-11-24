@@ -1,7 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from core import word_description_formatter as formatter
 
@@ -100,26 +100,46 @@ class WordDescriptionFormatterTests(unittest.TestCase):
             (locality / "a.docx").write_bytes(b"a")
             (locality / "b.docx").write_bytes(b"b")
             progress = []
+            messages = []
+            fake_pythoncom = Mock()
+            fake_word = object()
 
-            def format_one(source, *_args):
+            def format_one(_word, source, *_args):
                 if Path(source).name == "b.docx":
                     raise RuntimeError("повреждённый документ")
                 return formatter.DocumentInfo("адрес", "деревня Выбье", 2)
 
-            with patch.object(formatter, "format_document", side_effect=format_one):
+            with (
+                patch.object(formatter, "pythoncom", fake_pythoncom),
+                patch.object(formatter, "win32com", object()),
+                patch.object(formatter, "_open_word", return_value=fake_word) as open_word,
+                patch.object(formatter, "_finish_word") as finish_word,
+                patch.object(
+                    formatter,
+                    "_format_document_in_word",
+                    side_effect=format_one,
+                ),
+            ):
                 result = formatter.format_description_folder(
                     root,
                     "Ленинградская область",
                     "Кингисеппский муниципальный район",
                     "Большелуцкое сельское поселение",
                     lambda current, total: progress.append((current, total)),
+                    messages.append,
                 )
 
+            open_word.assert_called_once_with()
+            finish_word.assert_called_once_with(fake_word)
+            fake_pythoncom.CoInitialize.assert_called_once_with()
+            fake_pythoncom.CoUninitialize.assert_called_once_with()
             self.assertEqual(len(result.documents), 2)
             self.assertEqual(len(result.completed), 1)
             self.assertEqual(len(result.failures), 1)
             self.assertEqual(result.failures[0].source.name, "b.docx")
             self.assertEqual(progress, [(0, 2), (1, 2), (2, 2)])
+            self.assertTrue(any("[1/2] Начало" in message for message in messages))
+            self.assertTrue(any("Примерно осталось" in message for message in messages))
 
     def test_normalizes_short_locality_types(self):
         self.assertEqual(formatter.normalize_locality("д. Буркин Буерак"), "деревня Буркин Буерак")

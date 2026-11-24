@@ -433,11 +433,25 @@ class BasePage(QWidget):
                 self.progress_bar.setRange(0, max(1, maximum))
             self.progress_bar.setValue(value)
 
-    def start_task(self, fn, *args, on_result=None, on_error=None, on_finished=None, **kwargs):
+    def start_task(
+        self,
+        fn,
+        *args,
+        on_result=None,
+        on_error=None,
+        on_finished=None,
+        on_message=None,
+        on_progress=None,
+        **kwargs,
+    ):
         task = BackgroundTask(fn, *args, **kwargs)
         self._active_tasks.add(task)
         task.signals.message.connect(self.log)
         task.signals.progress.connect(self.update_progress)
+        if on_message:
+            task.signals.message.connect(on_message)
+        if on_progress:
+            task.signals.progress.connect(on_progress)
         if on_result:
             task.signals.result.connect(on_result)
         task.signals.error.connect(on_error or self.log)

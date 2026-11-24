@@ -196,6 +196,14 @@ class LoDescriptionPage(BasePage):
         action_card.addWidget(self.status_label)
         action_card.addWidget(self.setup_progress_bar())
         self.progress_bar.setVisible(False)
+        self.batch_log_title = QLabel("Журнал обработки")
+        self.batch_log_title.setObjectName("helpSectionTitle")
+        action_card.addWidget(self.batch_log_title)
+        action_card.addWidget(self.setup_log_area())
+        self.log_text.setMinimumHeight(130)
+        self.log_text.setMaximumHeight(210)
+        self.batch_log_title.setVisible(False)
+        self.log_text.setVisible(False)
         self.run_button = QPushButton("Оформить графическое описание")
         self.run_button.setProperty("primary", True)
         self.run_button.clicked.connect(self._run)
@@ -277,6 +285,8 @@ class LoDescriptionPage(BasePage):
             self.locality_edit.setPlaceholderText("Для пакета берётся из имени каждой папки НП")
             self.run_button.setText("Оформить все найденные описания")
             self.batch_preview_card.setVisible(True)
+            self.batch_log_title.setVisible(True)
+            self.log_text.setVisible(True)
             self._refresh_batch_documents()
             self._hide_activity()
             self._update_preview()
@@ -290,6 +300,8 @@ class LoDescriptionPage(BasePage):
         self._batch_documents = ()
         self.batch_table.setRowCount(0)
         self.batch_preview_card.setVisible(False)
+        self.batch_log_title.setVisible(False)
+        self.log_text.setVisible(False)
         self.run_button.setText("Оформить графическое описание")
         self.target_edit.setPlaceholderText("Отдельный файл результата")
         self.locality_edit.setPlaceholderText("Будет извлечён из исходного Word")
@@ -611,10 +623,12 @@ class LoDescriptionPage(BasePage):
                 return
 
         self._formatting = True
+        self.clear_log()
         self.status_label.setText(
             f"Пакетная обработка Word: 0 из {len(documents)}…"
         )
         self.progress_bar.setVisible(True)
+        self.progress_bar.setFormat("%v из %m (%p%)")
         self.update_progress(0, len(documents))
         self._refresh_controls()
         self.start_task(
@@ -626,6 +640,7 @@ class LoDescriptionPage(BasePage):
             on_result=self._batch_format_done,
             on_error=self._format_failed,
             on_finished=self._format_finished,
+            on_message=self._batch_message,
         )
 
     @staticmethod
@@ -636,7 +651,11 @@ class LoDescriptionPage(BasePage):
             district,
             settlement,
             lambda current, total: signals.progress.emit(current, total),
+            signals.message.emit,
         )
+
+    def _batch_message(self, text: str):
+        self.status_label.setText(str(text))
 
     def _batch_format_done(self, result: BatchFormatResult):
         success_count = len(result.completed)
@@ -688,11 +707,13 @@ class LoDescriptionPage(BasePage):
 
     def _show_activity(self):
         self.progress_bar.setVisible(True)
+        self.progress_bar.setFormat("%p%")
         self.progress_bar.setRange(0, 0)
 
     def _hide_activity(self):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
+        self.progress_bar.setFormat("%p%")
         self.progress_bar.setVisible(False)
 
     def _refresh_controls(self):

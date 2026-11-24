@@ -88,6 +88,7 @@ class LoDescriptionPageTests(unittest.TestCase):
                 self.assertEqual(len(page._batch_documents), 1)
                 self.assertEqual(page._batch_documents[0].locality, "деревня Выбье")
                 self.assertTrue(page.batch_preview_card.isVisibleTo(page))
+                self.assertTrue(page.log_text.isVisibleTo(page))
                 self.assertEqual(page.batch_table.rowCount(), 1)
                 self.assertEqual(page.batch_table.item(0, 2).text(), "НП")
                 self.assertIn("деревня Выбье", page.batch_table.item(0, 3).text())
@@ -100,6 +101,8 @@ class LoDescriptionPageTests(unittest.TestCase):
                 self.assertFalse(page.run_button.isEnabled())
                 page._set_all_batch_checked(True)
                 self.assertEqual(len(page._selected_batch_documents()), 1)
+                page._batch_message("[1/1] готово. Примерно осталось: 0 с.")
+                self.assertIn("Примерно осталось", page.status_label.text())
         finally:
             page.close()
 
