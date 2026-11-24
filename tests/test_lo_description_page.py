@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from pages.lo_description import LoDescriptionPage
@@ -65,6 +66,74 @@ class LoDescriptionPageTests(unittest.TestCase):
                     str(source.with_name("Описание_оформлено.docx")),
                 )
                 inspect.assert_called_once_with(source)
+        finally:
+            page.close()
+
+    def test_folder_selection_enables_batch_mode_and_ignores_archive_documents(self):
+        page = LoDescriptionPage()
+        try:
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                locality = root / "деревня Выбье"
+                locality.mkdir()
+                (locality / "описание.docx").write_bytes(b"example")
+                archive = root / "Архив"
+                archive.mkdir()
+                (archive / "старое.docx").write_bytes(b"old")
+
+                page.source_edit.setText(str(root))
+                page._source_selected(str(root))
+
+                self.assertTrue(page._is_batch_mode())
+                self.assertEqual(len(page._batch_documents), 1)
+                self.assertEqual(page._batch_documents[0].locality, "деревня Выбье")
+                self.assertTrue(page.batch_preview_card.isVisibleTo(page))
+                self.assertEqual(page.batch_table.rowCount(), 1)
+                self.assertEqual(page.batch_table.item(0, 2).text(), "НП")
+                self.assertIn("деревня Выбье", page.batch_table.item(0, 3).text())
+                self.assertFalse(page.target_edit.isEnabled())
+                self.assertFalse(page.locality_edit.isEnabled())
+                self.assertIn("Выбрано для обработки: 1", page.status_label.text())
+
+                page.batch_table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+                self.assertEqual(page._selected_batch_documents(), ())
+                self.assertFalse(page.run_button.isEnabled())
+                page._set_all_batch_checked(True)
+                self.assertEqual(len(page._selected_batch_documents()), 1)
+        finally:
+            page.close()
+
+    def test_batch_preview_shows_zone_and_outside_addresses(self):
+        page = LoDescriptionPage()
+        try:
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                inside = root / "_д. Выбье" / "Ж1"
+                outside = root / "_Вне НП" / "И1"
+                inside.mkdir(parents=True)
+                outside.mkdir(parents=True)
+                (inside / "внутри.docx").write_bytes(b"inside")
+                (outside / "снаружи.docx").write_bytes(b"outside")
+
+                page.region_edit.setText("Ленинградская область")
+                page.district_combo.setEditText("Кингисеппский м.р-н")
+                page.settlement_combo.setEditText("Усть-Лужское с.п.")
+                page.source_edit.setText(str(root))
+                page._source_selected(str(root))
+
+                rows = {
+                    page.batch_table.item(row, 2).text(): page.batch_table.item(row, 3).text()
+                    for row in range(page.batch_table.rowCount())
+                }
+                self.assertEqual(
+                    rows["ТЗ Ж1"],
+                    "Ленинградская область, Кингисеппский м.р-н, "
+                    "Усть-Лужское с.п., деревня Выбье",
+                )
+                self.assertEqual(
+                    rows["Вне НП · ТЗ И1"],
+                    "Ленинградская область, Кингисеппский м.р-н, Усть-Лужское с.п.",
+                )
         finally:
             page.close()
 

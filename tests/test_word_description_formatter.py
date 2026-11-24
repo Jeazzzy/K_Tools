@@ -7,6 +7,120 @@ from core import word_description_formatter as formatter
 
 
 class WordDescriptionFormatterTests(unittest.TestCase):
+    def test_reads_locality_only_from_explicit_folder_name(self):
+        self.assertEqual(
+            formatter.locality_from_folder_name("деревня Выбье"),
+            "деревня Выбье",
+        )
+        self.assertEqual(
+            formatter.locality_from_folder_name("п. Усть-Луга"),
+            "посёлок Усть-Луга",
+        )
+        self.assertEqual(
+            formatter.locality_from_folder_name("_д. Выбье"),
+            "деревня Выбье",
+        )
+        self.assertEqual(formatter.locality_from_folder_name("Архив"), "")
+        self.assertTrue(formatter.is_zone_folder_name("Ж1"))
+        self.assertTrue(formatter.is_zone_folder_name("П-2.1"))
+        self.assertFalse(formatter.is_zone_folder_name("РН"))
+        self.assertFalse(formatter.is_zone_folder_name("!архив"))
+        self.assertTrue(formatter.is_outside_locality_folder("_Вне НП"))
+        self.assertFalse(formatter.is_outside_locality_folder("деревня Выбье"))
+
+    def test_batch_discovery_skips_non_locality_folders_but_scans_their_children(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            direct = root / "_д. Выбье"
+            direct.mkdir()
+            (direct / "описание.docx").write_bytes(b"word")
+            (direct / "описание_оформлено.docx").write_bytes(b"result")
+            (direct / "~$описание.docx").write_bytes(b"lock")
+            nested_archive = direct / "Архив"
+            nested_archive.mkdir()
+            (nested_archive / "старое.docx").write_bytes(b"old")
+            zone = direct / "Ж1"
+            zone.mkdir()
+            (zone / "графическое описание.docx").write_bytes(b"zone")
+            service = direct / "РН"
+            service.mkdir()
+            (service / "служебное.docx").write_bytes(b"ignore")
+
+            archive = root / "Архив"
+            nested_locality = archive / "поселок Усть-Луга"
+            nested_locality.mkdir(parents=True)
+            (archive / "чужое.docx").write_bytes(b"ignore")
+            (nested_locality / "границы.doc").write_bytes(b"word")
+            outside_zone = root / "_Вне НП" / "И1"
+            outside_zone.mkdir(parents=True)
+            (outside_zone / "вне населённого пункта.docx").write_bytes(b"word")
+
+            documents = formatter.find_batch_documents(root)
+
+            self.assertEqual(
+                {document.source.relative_to(root).as_posix() for document in documents},
+                {
+                    "_д. Выбье/описание.docx",
+                    "_д. Выбье/Ж1/графическое описание.docx",
+                    "Архив/поселок Усть-Луга/границы.doc",
+                    "_Вне НП/И1/вне населённого пункта.docx",
+                },
+            )
+            localities = {document.source.name: document.locality for document in documents}
+            self.assertEqual(localities["описание.docx"], "деревня Выбье")
+            self.assertEqual(localities["графическое описание.docx"], "деревня Выбье")
+            self.assertEqual(localities["границы.doc"], "посёлок Усть-Луга")
+            self.assertEqual(localities["вне населённого пункта.docx"], "")
+
+    def test_explicit_empty_locality_means_outside_settlement(self):
+        address = (
+            "Ленинградская область, Кингисеппский м.р-н, "
+            "Усть-Лужское с.п., д. Выбье"
+        )
+        self.assertEqual(
+            formatter.resolve_locality(None, address, ""),
+            "деревня Выбье",
+        )
+        self.assertEqual(formatter.resolve_locality("", address, ""), "")
+        self.assertEqual(
+            formatter.build_full_address(
+                "Ленинградская область",
+                "Кингисеппский м.р-н",
+                "Усть-Лужское с.п.",
+                "",
+            ),
+            "Ленинградская область, Кингисеппский м.р-н, Усть-Лужское с.п.",
+        )
+
+    def test_batch_formatting_continues_after_one_document_fails(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            locality = root / "деревня Выбье"
+            locality.mkdir()
+            (locality / "a.docx").write_bytes(b"a")
+            (locality / "b.docx").write_bytes(b"b")
+            progress = []
+
+            def format_one(source, *_args):
+                if Path(source).name == "b.docx":
+                    raise RuntimeError("повреждённый документ")
+                return formatter.DocumentInfo("адрес", "деревня Выбье", 2)
+
+            with patch.object(formatter, "format_document", side_effect=format_one):
+                result = formatter.format_description_folder(
+                    root,
+                    "Ленинградская область",
+                    "Кингисеппский муниципальный район",
+                    "Большелуцкое сельское поселение",
+                    lambda current, total: progress.append((current, total)),
+                )
+
+            self.assertEqual(len(result.documents), 2)
+            self.assertEqual(len(result.completed), 1)
+            self.assertEqual(len(result.failures), 1)
+            self.assertEqual(result.failures[0].source.name, "b.docx")
+            self.assertEqual(progress, [(0, 2), (1, 2), (2, 2)])
+
     def test_normalizes_short_locality_types(self):
         self.assertEqual(formatter.normalize_locality("д. Буркин Буерак"), "деревня Буркин Буерак")
         self.assertEqual(formatter.normalize_locality("гп Кузнечное"), "городской посёлок Кузнечное")

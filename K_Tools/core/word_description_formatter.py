@@ -10,6 +10,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 try:
     import pythoncom
@@ -39,6 +40,36 @@ LOCALITY_PATTERN = re.compile(
     r"(.+?)(?=\s+муниципального\s+образования|\s+[А-ЯЁ][а-яё]+\s+области|\s*\(|$)",
     re.IGNORECASE,
 )
+FOLDER_LOCALITY_PATTERN = re.compile(
+    r"^(?P<kind>городской\s+пос[её]лок|дачный\s+пос[её]лок|рабочий\s+пос[её]лок|"
+    r"пос[её]лок\s+городского\s+типа|деревня|село|пос[её]лок|город|хутор|станция|"
+    r"пгт|рп|дп|гп|пос|д|с|п|г)\.?\s+(?P<name>.+)$",
+    re.IGNORECASE,
+)
+ZONE_FOLDER_PATTERN = re.compile(
+    r"^[А-ЯЁ]{1,8}[-_. ]*\d+(?:[.-]\d+)*(?:[_ -].*)?$",
+    re.IGNORECASE,
+)
+FOLDER_LOCALITY_TYPES = {
+    "деревня": "деревня",
+    "село": "село",
+    "поселок": "посёлок",
+    "посёлок": "посёлок",
+    "город": "город",
+    "хутор": "хутор",
+    "станция": "станция",
+    "городской поселок": "городской посёлок",
+    "городской посёлок": "городской посёлок",
+    "дачный поселок": "дачный посёлок",
+    "дачный посёлок": "дачный посёлок",
+    "рабочий поселок": "рабочий посёлок",
+    "рабочий посёлок": "рабочий посёлок",
+    "поселок городского типа": "посёлок городского типа",
+    "посёлок городского типа": "посёлок городского типа",
+    "пгт": "посёлок городского типа",
+    "рп": "рабочий посёлок",
+    **LOCALITY_TYPES,
+}
 DECIMAL_PATTERN = re.compile(r"(?<=\d)\.(?=\d)")
 PART_PATTERN = re.compile(r"\bчасть\s*(?:№|N|No\.?)\s*\d+", re.IGNORECASE)
 
@@ -48,6 +79,26 @@ class DocumentInfo:
     address: str
     locality: str
     coordinate_tables: int
+
+
+@dataclass(frozen=True)
+class BatchDocument:
+    source: Path
+    target: Path
+    locality: str
+
+
+@dataclass(frozen=True)
+class BatchFailure:
+    source: Path
+    message: str
+
+
+@dataclass(frozen=True)
+class BatchFormatResult:
+    documents: tuple[BatchDocument, ...]
+    completed: tuple[DocumentInfo, ...]
+    failures: tuple[BatchFailure, ...]
 
 
 def addresses_file() -> Path:
@@ -101,12 +152,88 @@ def extract_locality(address: str, title: str) -> str:
     return ""
 
 
+def locality_from_folder_name(name: str) -> str:
+    """Возвращает НП только для каталога с явным типом населённого пункта."""
+
+    value = re.sub(r"^[\s_!–—-]+", "", str(name))
+    value = re.sub(r"\s+", " ", value.strip()).rstrip(".,")
+    match = FOLDER_LOCALITY_PATTERN.fullmatch(value)
+    if not match:
+        return ""
+    kind = FOLDER_LOCALITY_TYPES[match.group("kind").casefold()]
+    locality_name = match.group("name").strip().rstrip(".,")
+    return f"{kind} {locality_name}" if locality_name else ""
+
+
+def is_outside_locality_folder(name: str) -> bool:
+    """Распознаёт каталог «Вне НП» с техническими префиксами."""
+
+    value = re.sub(r"^[\s_!–—-]+", "", str(name))
+    value = re.sub(r"[._\s-]+", " ", value.strip()).casefold()
+    return value == "вне нп"
+
+
+def is_zone_folder_name(name: str) -> bool:
+    """Распознаёт индекс ТЗ и не принимает служебные каталоги вроде РН/XML."""
+
+    value = re.sub(r"^[\s_!–—-]+", "", str(name)).strip()
+    return bool(ZONE_FOLDER_PATTERN.fullmatch(value))
+
+
+def find_batch_documents(root: str | Path) -> tuple[BatchDocument, ...]:
+    """Находит Word в каталогах НП и в их непосредственных каталогах ТЗ.
+
+    Каталоги без названия НП или индекса зоны не обрабатываются, но рекурсивный
+    обход через них продолжается. Поэтому «Архив» безопасно пропускается, а
+    находящаяся внутри него самостоятельная папка «деревня Пример» будет найдена.
+    """
+
+    root = Path(root)
+    if not root.is_dir():
+        raise ValueError("Выберите существующую корневую папку.")
+
+    documents: list[BatchDocument] = []
+    for directory_name, subdirectories, file_names in os.walk(root):
+        subdirectories.sort(key=str.casefold)
+        file_names.sort(key=str.casefold)
+        directory = Path(directory_name)
+        locality = locality_from_folder_name(directory.name)
+        eligible = bool(locality) or is_outside_locality_folder(directory.name)
+        if not eligible and is_zone_folder_name(directory.name):
+            parent = directory.parent.name
+            locality = locality_from_folder_name(parent)
+            eligible = bool(locality) or is_outside_locality_folder(parent)
+        if not eligible:
+            continue
+        for file_name in file_names:
+            source = directory / file_name
+            if source.suffix.casefold() not in {".doc", ".docx"}:
+                continue
+            if source.name.startswith("~$") or source.stem.casefold().endswith("_оформлено"):
+                continue
+            target = source.with_name(f"{source.stem}_оформлено{source.suffix}")
+            documents.append(BatchDocument(source, target, locality))
+    return tuple(documents)
+
+
 def build_full_address(region: str, district: str, settlement: str, locality: str) -> str:
     return ", ".join(
         part.strip().rstrip(",")
         for part in (region, district, settlement, locality)
         if part.strip()
     )
+
+
+def resolve_locality(
+    explicit_locality: str | None,
+    current_address: str,
+    title: str,
+) -> str:
+    """Отличает автоопределение НП от явно выбранного режима «Вне НП»."""
+
+    if explicit_locality is None:
+        return extract_locality(current_address, title)
+    return normalize_locality(explicit_locality)
 
 
 def _require_word_automation() -> None:
@@ -407,13 +534,14 @@ def format_document(
 
         current_address = clean_cell(document.Tables(1).Cell(4, 3))
         title = document.Paragraphs(3).Range.Text.strip()
-        place = normalize_locality(locality or extract_locality(current_address, title))
-        if not place:
+        place = resolve_locality(locality, current_address, title)
+        if locality is None and not place:
             raise ValueError("Не удалось найти населённый пункт. Укажите его вручную.")
 
         full_address = build_full_address(region, district, settlement, place)
         replace_cell(document.Tables(1).Cell(4, 3), full_address)
-        document.Paragraphs(3).Range.Text = place + "\r"
+        if place:
+            document.Paragraphs(3).Range.Text = place + "\r"
 
         coordinate_tables = []
         for index in range(1, document.Tables.Count + 1):
@@ -465,3 +593,57 @@ def format_document(
         temporary.unlink(missing_ok=True)
         raise
     return info
+
+
+def format_description_documents(
+    documents: tuple[BatchDocument, ...] | list[BatchDocument],
+    region: str,
+    district: str,
+    settlement: str,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> BatchFormatResult:
+    """Последовательно оформляет выбранные в предпросмотре документы."""
+
+    documents = tuple(documents)
+    completed: list[DocumentInfo] = []
+    failures: list[BatchFailure] = []
+    total = len(documents)
+    if progress_callback is not None:
+        progress_callback(0, max(total, 1))
+
+    for position, document in enumerate(documents, start=1):
+        try:
+            completed.append(
+                format_document(
+                    document.source,
+                    document.target,
+                    region,
+                    district,
+                    settlement,
+                    document.locality,
+                )
+            )
+        except Exception as error:
+            failures.append(BatchFailure(document.source, str(error)))
+        if progress_callback is not None:
+            progress_callback(position, max(total, 1))
+
+    return BatchFormatResult(documents, tuple(completed), tuple(failures))
+
+
+def format_description_folder(
+    root: str | Path,
+    region: str,
+    district: str,
+    settlement: str,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> BatchFormatResult:
+    """Последовательно оформляет все документы, найденные в корневой папке."""
+
+    return format_description_documents(
+        find_batch_documents(root),
+        region,
+        district,
+        settlement,
+        progress_callback,
+    )
